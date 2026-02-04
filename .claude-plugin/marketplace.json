@@ -1,0 +1,14 @@
+{
+  "name": "launchdarkly-agent-skills",
+  "owner": {
+    "name": "LaunchDarkly Labs",
+    "url": "https://github.com/launchdarkly-labs"
+  },
+  "plugins": [
+    {
+      "name": "launchdarkly",
+      "description": "LaunchDarkly internal skills: feature flags, experiments, documentation, and workflows",
+      "source": "./plugins/launchdarkly"
+    }
+  ]
+}
