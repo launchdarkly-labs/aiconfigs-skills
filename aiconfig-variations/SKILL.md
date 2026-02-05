@@ -121,7 +121,7 @@ Priority: {{support_priority}}""",
 
     if created_variations:
         print(f"\n[OK] Added {len(created_variations)} variations to '{config_key}'")
-        print(f"  URL: https://app.launchdarkly.com/{PROJECT_KEY}/ai-configs/{config_key}")
+        print(f"  URL: https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/{config_key}")
         return True
 
     return False
@@ -203,7 +203,7 @@ def add_completion_variations(config_key: str):
 
     if created_variations:
         print(f"\n[OK] Added {len(created_variations)} variations to '{config_key}'")
-        print(f"  URL: https://app.launchdarkly.com/{PROJECT_KEY}/ai-configs/{config_key}")
+        print(f"  URL: https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/{config_key}")
         return True
 
     return False

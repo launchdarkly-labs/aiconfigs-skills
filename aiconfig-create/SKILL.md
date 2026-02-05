@@ -234,7 +234,7 @@ Priority: {{support_priority}}""",
         return None
 
     print(f"[OK] Created AI Config: {config_key}")
-    print(f"  URL: https://app.launchdarkly.com/{PROJECT_KEY}/ai-configs/{config_key}")
+    print(f"  URL: https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/{config_key}")
     print(f"  Default variation: 'default'")
     return response.json()
 
@@ -302,7 +302,7 @@ def create_completion_config():
         return None
 
     print(f"[OK] Created AI Config: {config_key}")
-    print(f"  URL: https://app.launchdarkly.com/{PROJECT_KEY}/ai-configs/{config_key}")
+    print(f"  URL: https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/{config_key}")
     print(f"  Default variation: 'default'")
     return response.json()
 
