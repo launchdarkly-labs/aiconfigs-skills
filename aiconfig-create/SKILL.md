@@ -17,6 +17,42 @@ Create a new AI Config in LaunchDarkly using the API, enabling dynamic configura
 - API access token with `ai-configs:write` permission
 - Project key (create one using the `aiconfig-projects` skill if needed)
 
+> **Note:** The LaunchDarkly MCP server has `create-ai-config` and `create-ai-config-variation` tools, but they cannot configure tools, model parameters, or custom parameters. Use the REST API below for full functionality. See `aiconfig-api` for details.
+
+## API Key Detection
+
+Before prompting the user for an API key, try to detect it automatically:
+
+1. **Check Claude MCP config** - Read `~/.claude/config.json` and look for `mcpServers.launchdarkly.env.LAUNCHDARKLY_API_KEY`
+2. **Check environment variables** - Look for `LAUNCHDARKLY_API_KEY`, `LAUNCHDARKLY_API_TOKEN`, or `LD_API_KEY`
+3. **Prompt user** - Only if detection fails, ask the user for their API key
+
+```python
+import os
+import json
+from pathlib import Path
+
+def get_launchdarkly_api_key():
+    """Auto-detect LaunchDarkly API key from Claude config or environment."""
+    # 1. Check Claude MCP config
+    claude_config = Path.home() / ".claude" / "config.json"
+    if claude_config.exists():
+        try:
+            config = json.load(open(claude_config))
+            api_key = config.get("mcpServers", {}).get("launchdarkly", {}).get("env", {}).get("LAUNCHDARKLY_API_KEY")
+            if api_key:
+                return api_key
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # 2. Check environment variables
+    for var in ["LAUNCHDARKLY_API_KEY", "LAUNCHDARKLY_API_TOKEN", "LD_API_KEY"]:
+        if os.environ.get(var):
+            return os.environ[var]
+
+    return None
+```
+
 ## Agent Mode vs Completion Mode
 
 ### Understanding the Difference
@@ -128,10 +164,18 @@ Based on mode, prepare the appropriate structure:
 - Custom parameters for your application
 
 **Important: Tools Setup**
-- Tools must be created BEFORE they can be referenced in variations
-- Use the `aiconfig-tools` skill to create tools
-- Once created, reference them as: `[{"key": "tool-name", "version": 1}]`
-- Tools work in BOTH agent and completion modes
+- Tools must be created BEFORE they can be attached to variations
+- **API endpoint for tools:** `POST https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-tools`
+- Do NOT use `/ai-configs/tools` - that endpoint does not exist
+
+**⚠️ Tools cannot be attached via defaultVariation** - they are ignored during config creation. You must:
+1. Create the AI Config first (without tools)
+2. Then PATCH the variation to attach tools:
+   ```
+   PATCH /api/v2/projects/{PROJECT_KEY}/ai-configs/{CONFIG_KEY}/variations/{VARIATION_KEY}
+   {"tools": [{"key": "tool-name", "version": 1}]}
+   ```
+- See `aiconfig-tools` skill for the complete workflow
 
 ### Step 4: Create via API
 
@@ -161,15 +205,80 @@ def create_aiconfig(api_token, project_key, config_data):
 
 ### Step 5: Verify Creation
 
-1. Confirm the AI Config was created successfully
-2. Provide the config URL for user reference
-3. Suggest next steps (targeting, experimentation, SDK integration)
+**IMPORTANT:** Always verify the config was created correctly with all properties.
+
+1. **Fetch the created config via API to verify:**
+```python
+def verify_config(api_token, project_key, config_key):
+    """Verify AI Config was created with correct properties."""
+    url = f"https://app.launchdarkly.com/api/v2/projects/{project_key}/ai-configs/{config_key}"
+    headers = {"Authorization": api_token}
+
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        config = response.json()
+        print(f"[OK] Config: {config['key']}")
+        print(f"     Mode: {config['mode']}")
+        print(f"     Variations: {len(config.get('variations', []))}")
+        for v in config.get('variations', []):
+            model = v.get('model', {})
+            tools = v.get('tools', [])
+            print(f"     - {v['key']}: {model.get('modelName', 'NO MODEL')} ({len(tools)} tools)")
+            if model.get('parameters'):
+                print(f"       Parameters: {model['parameters']}")
+            else:
+                print(f"       [WARNING] No parameters set!")
+        return config
+    return None
+```
+
+2. **Check for missing model/parameters** - If a variation shows no model or parameters:
+```python
+def fix_variation_model(api_token, project_key, config_key, variation_key, model_config):
+    """Fix missing model configuration on a variation."""
+    url = f"https://app.launchdarkly.com/api/v2/projects/{project_key}/ai-configs/{config_key}/variations/{variation_key}"
+    headers = {"Authorization": api_token, "Content-Type": "application/json"}
+
+    response = requests.patch(url, headers=headers, json={"model": model_config})
+    return response.status_code == 200
+```
+
+3. **ALWAYS provide the config URL to the user:**
+   ```
+   https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/{CONFIG_KEY}
+   ```
+
+4. **Suggest next steps** (targeting, experimentation, SDK integration)
+
+## Model Configuration
+
+### List Available Models
+
+Fetch available model configs from the API:
+
+```bash
+GET https://app.launchdarkly.com/api/v2/projects/{projectKey}/ai-configs/model-configs
+```
+
+Response includes `key` (use as `modelConfigKey`), `provider`, `name`, and pricing info.
+
+### modelConfigKey (Required)
+
+**`modelConfigKey` is required for models to display correctly in the UI.** The format is `{Provider}.{model-id}`:
+
+| Provider | Model ID | modelConfigKey |
+|----------|----------|----------------|
+| OpenAI | gpt-4o | `OpenAI.gpt-4o` |
+| OpenAI | gpt-4o-mini | `OpenAI.gpt-4o-mini` |
+| Anthropic | claude-sonnet-4-5 | `Anthropic.claude-sonnet-4-5` |
+| Anthropic | claude-3-5-sonnet | `Anthropic.claude-3-5-sonnet` |
+| Bedrock | anthropic.claude-3-5-sonnet | `Bedrock.anthropic.claude-3-5-sonnet` |
 
 ## Python Examples
 
-### Example 1: Complete Agent Mode Config
+### Example 1: Complete Agent Mode Config (Two-Step)
 
-Creates an AI Config with a default variation in a single API call. Includes tools and custom parameters.
+Creates an AI Config first, then adds a variation with proper model configuration.
 
 ```python
 import requests
@@ -181,17 +290,40 @@ API_TOKEN = os.environ.get("LAUNCHDARKLY_API_TOKEN")
 PROJECT_KEY = "support-ai"
 
 def create_agent_config():
-    """Create an AI Config for agent mode with defaultVariation."""
+    """Create an AI Config for agent mode using two-step process."""
     config_key = "support-agent"
 
+    headers = {
+        "Authorization": API_TOKEN,
+        "Content-Type": "application/json",
+        "LD-API-Version": "beta"
+    }
+
+    # Step 1: Create AI Config (without defaultVariation for reliable model config)
     config_data = {
         "key": config_key,
         "name": "Customer Support Agent",
         "mode": "agent",
-        "defaultVariation": {
-            "key": "default",
-            "name": "Default Configuration",
-            "instructions": """You are a helpful customer support agent.
+        "provider": {"name": "openai"},  # Provider at config level
+        "modelName": "gpt-4o"             # Model at config level
+    }
+
+    url = f"https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-configs"
+    response = requests.post(url, headers=headers, json=config_data)
+
+    if response.status_code not in [200, 201]:
+        print(f"[ERROR] Failed to create config: {response.text}")
+        return None
+
+    print(f"[OK] Created AI Config: {config_key}")
+    time.sleep(0.5)
+
+    # Step 2: Create variation with model configuration
+    # modelConfigKey is the key field that makes the model show in UI
+    variation_data = {
+        "key": "default",
+        "name": "Default Configuration",
+        "instructions": """You are a helpful customer support agent.
 
 Your responsibilities:
 - Answer customer questions
@@ -200,115 +332,109 @@ Your responsibilities:
 
 Company: {{company_name}}
 Priority: {{support_priority}}""",
-            "messages": [],  # Required for agent mode
-            "model": {
-                "name": "openai",
-                "modelName": "gpt-4",
-                "parameters": {
-                    "temperature": 0.7,
-                    "maxTokens": 2000,
-                    # Optional: custom parameters for your application
-                    "custom_param": "value",
-                    "enable_feature": True
-                }
-            },
-            # Optional: tools created via aiconfig-tools skill
-            "tools": [
-                {"key": "search_knowledge_base", "version": 1},
-                {"key": "get_customer_info", "version": 1}
-            ]
+        "modelConfigKey": "OpenAI.gpt-4o",  # Format: {Provider}.{model-id}
+        "model": {
+            "modelName": "gpt-4o",
+            "parameters": {"temperature": 0.7, "maxTokens": 2000}
         }
     }
 
-    url = f"https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-configs"
-    headers = {
-        "Authorization": API_TOKEN,
-        "Content-Type": "application/json",
-        "LD-API-Version": "beta"
-    }
+    var_url = f"https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-configs/{config_key}/variations"
+    var_response = requests.post(var_url, headers=headers, json=variation_data)
 
-    response = requests.post(url, headers=headers, json=config_data)
-
-    if response.status_code != 201:
-        print(f"[ERROR] Failed to create config: {response.text}")
+    if var_response.status_code not in [200, 201]:
+        print(f"[ERROR] Failed to create variation: {var_response.text}")
         return None
 
-    print(f"[OK] Created AI Config: {config_key}")
+    print(f"[OK] Created variation 'default' with model gpt-4o")
     print(f"  URL: https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/{config_key}")
-    print(f"  Default variation: 'default'")
-    return response.json()
+    return var_response.json()
 
 # Execute
 if __name__ == "__main__":
     create_agent_config()
 ```
 
-### Example 2: Complete Completion Mode Config
+### Example 2: Multiple Variations with Different Models
 
-Creates a completion mode config with messages array and tools.
+Creates an AI Config with multiple variations using different models.
 
 ```python
-def create_completion_config():
-    """Create an AI Config for completion mode with defaultVariation."""
+def create_multi_variation_config():
+    """Create an AI Config with multiple variations for A/B testing."""
     config_key = "content-assistant"
 
-    config_data = {
-        "key": config_key,
-        "name": "Content Generation Assistant",
-        "mode": "completion",
-        "defaultVariation": {
-            "key": "default",
-            "name": "Default Configuration",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a creative content writer for {{brand}}."
-                },
-                {
-                    "role": "user",
-                    "content": "{{content_request}}"
-                }
-            ],
-            "model": {
-                "name": "openai",
-                "modelName": "gpt-4",
-                "parameters": {
-                    "temperature": 0.9,
-                    "maxTokens": 2000,
-                    # Optional: custom parameters for your application
-                    "style_guide": "creative",
-                    "output_format": "markdown"
-                }
-            },
-            # Optional: tools created via aiconfig-tools skill
-            "tools": [
-                {"key": "search_knowledge_base", "version": 1},
-                {"key": "get_customer_info", "version": 1}
-            ]
-        }
-    }
-
-    url = f"https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-configs"
     headers = {
         "Authorization": API_TOKEN,
         "Content-Type": "application/json",
         "LD-API-Version": "beta"
     }
 
+    # Step 1: Create AI Config
+    config_data = {
+        "key": config_key,
+        "name": "Content Generation Assistant",
+        "mode": "completion",
+        "provider": {"name": "openai"},
+        "modelName": "gpt-4o"
+    }
+
+    url = f"https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-configs"
     response = requests.post(url, headers=headers, json=config_data)
 
-    if response.status_code != 201:
+    if response.status_code not in [200, 201]:
         print(f"[ERROR] Failed to create config: {response.text}")
         return None
 
     print(f"[OK] Created AI Config: {config_key}")
+    time.sleep(0.5)
+
+    # Step 2: Create variations with different models
+    # modelConfigKey is the key field for model selection
+    variations = [
+        {
+            "key": "standard",
+            "name": "Standard (GPT-4o-mini)",
+            "messages": [
+                {"role": "system", "content": "You are a helpful content writer."},
+                {"role": "user", "content": "{{content_request}}"}
+            ],
+            "modelConfigKey": "OpenAI.gpt-4o-mini",
+            "model": {
+                "modelName": "gpt-4o-mini",
+                "parameters": {"temperature": 0.7, "maxTokens": 1000}
+            }
+        },
+        {
+            "key": "premium",
+            "name": "Premium (GPT-4o)",
+            "messages": [
+                {"role": "system", "content": "You are a creative content expert."},
+                {"role": "user", "content": "{{content_request}}"}
+            ],
+            "modelConfigKey": "OpenAI.gpt-4o",
+            "model": {
+                "modelName": "gpt-4o",
+                "parameters": {"temperature": 0.8, "maxTokens": 2000}
+            }
+        }
+    ]
+
+    var_url = f"https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-configs/{config_key}/variations"
+
+    for var in variations:
+        var_response = requests.post(var_url, headers=headers, json=var)
+        if var_response.status_code in [200, 201]:
+            print(f"[OK] Created variation '{var['key']}' with {var['model']['modelName']}")
+        else:
+            print(f"[ERROR] Failed to create variation '{var['key']}': {var_response.text}")
+        time.sleep(0.5)
+
     print(f"  URL: https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/{config_key}")
-    print(f"  Default variation: 'default'")
-    return response.json()
 
 # Execute
 if __name__ == "__main__":
-    create_completion_config()
+    create_multi_variation_config()
 ```
 
 ### Custom Parameters

@@ -17,6 +17,93 @@ Access LaunchDarkly AI Configs through the REST API to perform operations not av
 - Project where you want to manage AI Configs
 - Understanding of REST API concepts
 
+## API Key Detection
+
+Before prompting the user for an API key, try to detect it automatically:
+
+1. **Check Claude MCP config** - Read `~/.claude/config.json` and look for `mcpServers.launchdarkly.env.LAUNCHDARKLY_API_KEY`
+2. **Check environment variables** - Look for `LAUNCHDARKLY_API_KEY`, `LAUNCHDARKLY_API_TOKEN`, or `LD_API_KEY`
+3. **Prompt user** - Only if detection fails, ask the user for their API key
+
+```python
+import os
+import json
+from pathlib import Path
+
+def get_launchdarkly_api_key():
+    """Auto-detect LaunchDarkly API key from Claude config or environment."""
+    # 1. Check Claude MCP config
+    claude_config = Path.home() / ".claude" / "config.json"
+    if claude_config.exists():
+        try:
+            config = json.load(open(claude_config))
+            api_key = config.get("mcpServers", {}).get("launchdarkly", {}).get("env", {}).get("LAUNCHDARKLY_API_KEY")
+            if api_key:
+                return api_key
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # 2. Check environment variables
+    for var in ["LAUNCHDARKLY_API_KEY", "LAUNCHDARKLY_API_TOKEN", "LD_API_KEY"]:
+        if os.environ.get(var):
+            return os.environ[var]
+
+    return None
+```
+
+## MCP Server vs REST API
+
+The [LaunchDarkly MCP server](https://docs.launchdarkly.com/home/getting-started/launchdarkly-mcp-server) provides basic AI Config operations via natural language in AI clients (Claude, Cursor, etc.).
+
+**MCP tools available:**
+- `list-ai-configs`, `get-ai-config`, `create-ai-config`, `update-ai-config`, `delete-ai-config`
+- `get-ai-config-variation`, `create-ai-config-variation`, `update-ai-config-variation`, `delete-ai-config-variation`
+
+**Current MCP limitations** (see [issue #40](https://github.com/launchdarkly/mcp-server/issues/40)):
+- Cannot configure `tools`, `model.parameters`, `customParameters`, or `judgeConfiguration` on variations
+- No endpoints for managing AI tool definitions (`/ai-tools`)
+- Targeting, segments, and metrics operations not available
+
+**Recommendation:** Use the REST API (documented below) for full AI Config functionality. MCP is useful for basic listing and skeleton creation only.
+
+### Configure MCP Server
+
+If you want to use MCP for basic operations, configure it in your AI client:
+
+**Claude Code (`~/.claude/mcp.json`):**
+```json
+{
+  "mcpServers": {
+    "launchdarkly": {
+      "command": "npx",
+      "args": ["-y", "@launchdarkly/mcp-server", "start"],
+      "env": {
+        "LD_ACCESS_TOKEN": "your-api-token"
+      }
+    }
+  }
+}
+```
+
+**Cursor (`.cursor/mcp.json`):**
+```json
+{
+  "mcpServers": {
+    "launchdarkly": {
+      "command": "npx",
+      "args": ["-y", "@launchdarkly/mcp-server", "start"],
+      "env": {
+        "LD_ACCESS_TOKEN": "your-api-token"
+      }
+    }
+  }
+}
+```
+
+Replace `your-api-token` with your LaunchDarkly API access token. After configuring, restart your AI client.
+
+For more details, see the [LaunchDarkly MCP Server Documentation](https://docs.launchdarkly.com/home/getting-started/launchdarkly-mcp-server).
+
 ## Getting an API Access Token
 
 ### Create a Personal Access Token

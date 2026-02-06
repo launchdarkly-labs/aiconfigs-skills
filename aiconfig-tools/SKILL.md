@@ -17,6 +17,42 @@ Create and manage tools that enable AI agents to call functions, interact with e
 - Project key
 - Understanding of function calling in AI models
 
+> **Note:** The LaunchDarkly MCP server does not currently have endpoints for managing AI tools (`/ai-tools`). Use the REST API below. See `aiconfig-api` for details on MCP limitations.
+
+## API Key Detection
+
+Before prompting the user for an API key, try to detect it automatically:
+
+1. **Check Claude MCP config** - Read `~/.claude/config.json` and look for `mcpServers.launchdarkly.env.LAUNCHDARKLY_API_KEY`
+2. **Check environment variables** - Look for `LAUNCHDARKLY_API_KEY`, `LAUNCHDARKLY_API_TOKEN`, or `LD_API_KEY`
+3. **Prompt user** - Only if detection fails, ask the user for their API key
+
+```python
+import os
+import json
+from pathlib import Path
+
+def get_launchdarkly_api_key():
+    """Auto-detect LaunchDarkly API key from Claude config or environment."""
+    # 1. Check Claude MCP config
+    claude_config = Path.home() / ".claude" / "config.json"
+    if claude_config.exists():
+        try:
+            config = json.load(open(claude_config))
+            api_key = config.get("mcpServers", {}).get("launchdarkly", {}).get("env", {}).get("LAUNCHDARKLY_API_KEY")
+            if api_key:
+                return api_key
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # 2. Check environment variables
+    for var in ["LAUNCHDARKLY_API_KEY", "LAUNCHDARKLY_API_TOKEN", "LD_API_KEY"]:
+        if os.environ.get(var):
+            return os.environ[var]
+
+    return None
+```
+
 ## What Are Tools?
 
 Tools are function definitions that AI models can invoke to:
@@ -30,6 +66,13 @@ Tools are function definitions that AI models can invoke to:
 Tools work in **BOTH agent and completion modes** via function calling.
 
 ## Tool Management API
+
+**IMPORTANT - API Endpoint:**
+```
+Base URL: https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-tools
+```
+
+Do NOT use `/ai-configs/tools` - that endpoint does not exist. The correct path is `/ai-tools`.
 
 > **Note on Orchestrator Integration**: Many AI orchestrators (like LangGraph, CrewAI, AutoGen) automatically create their own tool schemas from function definitions. When using these frameworks, you often don't need to manually define JSON schemas - the orchestrator will generate them based on your tool's function signature and docstring. However, you still need to attach the tool names/keys to your AI Config variations so the SDK knows which tools are available for each variation.
 
@@ -58,10 +101,14 @@ def create_tool(tool_key: str, schema: dict, description: str = None):
     response = requests.post(url, json=payload, headers=headers)
 
     if response.status_code == 201:
+        print(f"[OK] Created tool: {tool_key}")
+        print(f"  URL: https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/tools")
         return response.json()
     elif response.status_code == 409:
+        print(f"[INFO] Tool already exists: {tool_key}")
         return get_tool(tool_key)
     else:
+        print(f"[ERROR] Failed to create tool: {response.text}")
         return None
 
 # Example: Create a search tool (plain JSON Schema format)
@@ -208,59 +255,47 @@ get_tool_versions("search_knowledge_base")
 
 ## Attaching Tools to AI Config Variations
 
-After creating tools, attach them to AI Config variations to enable function calling:
+After creating tools, attach them to AI Config variations to enable function calling.
+
+**⚠️ IMPORTANT:** Tools **cannot** be attached via `defaultVariation` when creating an AI Config - they will be ignored. You **must** use a separate PATCH request to attach tools after the config is created.
+
+### Complete Workflow
+
+1. **Create tools** via `POST /ai-tools`
+2. **Create AI Config** via `POST /ai-configs` (without tools)
+3. **Attach tools** via `PATCH /ai-configs/{config}/variations/{variation}`
+4. **ALWAYS provide URLs to the user:**
+   - Tools: `https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/tools`
+   - AI Config: `https://app.launchdarkly.com/projects/{PROJECT_KEY}/ai-configs/{CONFIG_KEY}`
 
 ### Add Tools to a Variation
 
 ```python
-def attach_tools_to_variation(config_key: str, variation_id: str, tool_keys: list):
+def attach_tools_to_variation(config_key: str, variation_key: str, tool_keys: list):
     """
     Attach tools to a specific variation of an AI Config.
-    Tools must be created first using create_tool().
-    """
 
-    # First, get the config to find the variation
-    url = f"https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-configs/{config_key}"
+    IMPORTANT: This must be called AFTER creating the AI Config.
+    Tools cannot be attached via defaultVariation during config creation.
+    """
+    url = f"https://app.launchdarkly.com/api/v2/projects/{PROJECT_KEY}/ai-configs/{config_key}/variations/{variation_key}"
 
     headers = {
         "Authorization": API_TOKEN,
         "Content-Type": "application/json"
     }
 
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        print(f"[ERROR] Failed to get config: {response.text}")
-        return None
-
-    config = response.json()
-
-    # Find and update the variation
-    variations = config.get('variations', [])
-    variation_found = False
-
-    for variation in variations:
-        if variation.get('_id') == variation_id or variation.get('key') == variation_id:
-            # Format tools for the variation
-            variation['tools'] = [
-                {"key": tool_key, "version": 1}
-                for tool_key in tool_keys
-            ]
-            variation_found = True
-            break
-
-    if not variation_found:
-        print(f"[ERROR] Variation '{variation_id}' not found")
-        return None
-
-    # Update the config with modified variations
-    update_payload = {
-        "variations": variations
+    payload = {
+        "tools": [
+            {"key": tool_key, "version": 1}
+            for tool_key in tool_keys
+        ]
     }
 
-    response = requests.patch(url, json=update_payload, headers=headers)
+    response = requests.patch(url, json=payload, headers=headers)
 
     if response.status_code == 200:
-        print(f"[OK] Attached {len(tool_keys)} tools to variation '{variation_id}'")
+        print(f"[OK] Attached {len(tool_keys)} tools to variation '{variation_key}'")
         return response.json()
     else:
         print(f"[ERROR] Failed to attach tools: {response.text}")
@@ -273,7 +308,7 @@ tools_to_attach = [
     "send_email"
 ]
 
-attach_tools_to_variation("support-agent", "base-config", tools_to_attach)
+attach_tools_to_variation("support-agent", "default", tools_to_attach)
 ```
 
 ### Update Tools in Variation
